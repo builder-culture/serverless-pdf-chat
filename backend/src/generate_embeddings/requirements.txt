@@ -4,3 +4,4 @@ faiss-cpu==1.7.4
 langchain==0.0.312
 pypdf==3.16.2
 urllib3
+amazon-textract-caller==0.0.29

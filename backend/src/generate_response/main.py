@@ -7,7 +7,7 @@ from langchain.memory import ConversationBufferMemory
 from langchain.embeddings import BedrockEmbeddings
 from langchain.vectorstores import FAISS
 from langchain.chains import ConversationalRetrievalChain
-
+from langchain.prompts import PromptTemplate
 
 MEMORY_TABLE = os.environ["MEMORY_TABLE"]
 BUCKET = os.environ["BUCKET"]
@@ -34,13 +34,30 @@ def lambda_handler(event, context):
         region_name="us-east-1",
     )
 
+    ##'max_tokens_to_sample':8191
+
+    inference_modifier = {'max_tokens_to_sample':4096, 
+                      "temperature":0.2,
+                      "top_k":500,
+                      "top_p":1,
+                      "stop_sequences": ["\n\nHuman"]
+                     }
+
+
+    bedrock_model_id = "anthropic.claude-v2:1"
+    ##bedrock_model_id = "anthropic.claude-v1"
+
     embeddings, llm = BedrockEmbeddings(
         model_id="amazon.titan-embed-text-v1",
         client=bedrock_runtime,
         region_name="us-east-1",
     ), Bedrock(
-        model_id="anthropic.claude-v2", client=bedrock_runtime, region_name="us-east-1"
+        model_id=bedrock_model_id, 
+        client=bedrock_runtime, 
+        region_name="us-east-1",
+        model_kwargs=inference_modifier
     )
+
     faiss_index = FAISS.load_local("/tmp", embeddings)
 
     message_history = DynamoDBChatMessageHistory(
@@ -53,15 +70,49 @@ def lambda_handler(event, context):
         input_key="question",
         output_key="answer",
         return_messages=True,
+        
     )
+
+    # Retrieve more documents with higher diversity
+    # Useful if your dataset has many similar documents
+    faiss_retriever = faiss_index.as_retriever(search_kwargs={'k': 7})
+    #faiss_retriever = faiss_index.as_retriever()
 
     qa = ConversationalRetrievalChain.from_llm(
         llm=llm,
-        retriever=faiss_index.as_retriever(),
+        retriever=faiss_retriever,
         memory=memory,
         return_source_documents=True,
     )
 
+    qa.combine_docs_chain.llm_chain.prompt = PromptTemplate.from_template("""
+                                                                   
+        Human: Eres un asistente para buscar información contenida en documentos y responder de forma concisa. 
+        Utiliza el siguiente contexto del documento o fragmentos de documentos para dar una respuesta concisa y analítica.
+        No generarás una respuesta fuera del contexto del documento o fragmentos de documentos proporcionados, 
+        tampoco elaborarás inferencias o entendidos sin un soporte.  
+        
+        Assistant: Entendido
+
+        {chat_history}
+                                                                                                                                           
+        <context>                                                   
+        {context}                                                                
+        </context>
+                                                                          
+        Human: Utiliza el contexto del documento proporcionado para dar una respuesta concisa y analítica a la pregunta proporcionada, sin hacer inferencias o entendidos.
+        Proporciona primero la respuesta y después cita al menos uno de los apartados o fragmentos  que fundamentan la respuesta,
+        Si es muy extenso el fundamento de la respuesta basta con citar en la respuesta secciones o apartados en los que se soporta la respuesta.
+        Muy importante, si no conoces la respuesta, solamente di que no sabes, no trates de generar una respuesta.
+
+        Assistant: Entendido, te proporcionare una respuesta concisa y analítica mediante el contexto del documento o fragmentos de documentos proporcionados, 
+        y lo hare de forma breve y concisa. 
+        No generaré respuestas, o inferencias, o entendidos sin un fundamento.                                                                   
+                                                                                                                                         
+        Human: {question}
+                                                  
+        Assistant: """)
+    
     res = qa({"question": human_input})
 
     logger.info(res)

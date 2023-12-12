@@ -37,6 +37,8 @@ Resources:
   DocumentBucket:
     Type: "AWS::S3::Bucket"
     Properties:
+      AccelerateConfiguration:
+        AccelerationStatus: Enabled
       BucketName: !Sub "${AWS::StackName}-${AWS::Region}-${AWS::AccountId}"
       CorsConfiguration:
         CorsRules:
@@ -176,9 +178,14 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/generate_presigned_url/
+      Timeout: 60
+      MemorySize: 2048
+      AutoPublishAlias: live
       Policies:
         - S3CrudPolicy:
             BucketName: !Ref DocumentBucket
+      ProvisionedConcurrencyConfig:
+        ProvisionedConcurrentExecutions: 1
       Environment:
         Variables:
           BUCKET: !Ref DocumentBucket
@@ -195,6 +202,9 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/upload_trigger/
+      Timeout: 60
+      MemorySize: 2048
+      AutoPublishAlias: live
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref DocumentTable
@@ -204,6 +214,8 @@ Resources:
             BucketName: !Sub "${AWS::StackName}-${AWS::Region}-${AWS::AccountId}*"
         - SQSSendMessagePolicy:
             QueueName: !GetAtt EmbeddingQueue.QueueName
+      ProvisionedConcurrencyConfig:
+        ProvisionedConcurrentExecutions: 1
       Environment:
         Variables:
           DOCUMENT_TABLE: !Ref DocumentTable
@@ -227,11 +239,16 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/get_document/
+      Timeout: 60
+      MemorySize: 2048
+      AutoPublishAlias: live
       Policies:
         - DynamoDBReadPolicy:
             TableName: !Ref DocumentTable
         - DynamoDBReadPolicy:
             TableName: !Ref MemoryTable
+      ProvisionedConcurrencyConfig:
+        ProvisionedConcurrentExecutions: 1
       Environment:
         Variables:
           DOCUMENT_TABLE: !Ref DocumentTable
@@ -248,9 +265,14 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/get_all_documents/
+      Timeout: 60
+      MemorySize: 2048
+      AutoPublishAlias: live
       Policies:
         - DynamoDBReadPolicy:
             TableName: !Ref DocumentTable
+      ProvisionedConcurrencyConfig:
+        ProvisionedConcurrentExecutions: 1
       Environment:
         Variables:
           DOCUMENT_TABLE: !Ref DocumentTable
@@ -266,11 +288,16 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/add_conversation/
+      Timeout: 60
+      MemorySize: 4096
+      AutoPublishAlias: live
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref DocumentTable
         - DynamoDBCrudPolicy:
             TableName: !Ref MemoryTable
+      ProvisionedConcurrencyConfig:
+        ProvisionedConcurrentExecutions: 1
       Environment:
         Variables:
           DOCUMENT_TABLE: !Ref DocumentTable
@@ -288,7 +315,8 @@ Resources:
     Properties:
       CodeUri: src/generate_embeddings/
       Timeout: 180
-      MemorySize: 2048
+      MemorySize: 6144
+      AutoPublishAlias: live
       Policies:
         - SQSPollerPolicy:
             QueueName: !GetAtt EmbeddingQueue.QueueName
@@ -296,15 +324,21 @@ Resources:
             BucketName: !Ref DocumentBucket
         - DynamoDBCrudPolicy:
             TableName: !Ref DocumentTable
+        - TextractDetectAnalyzePolicy: {}
+        - TextractGetResultPolicy: {}    
         - Statement:
             - Sid: "BedrockScopedAccess"
               Effect: "Allow"
               Action: "bedrock:InvokeModel"
               Resource: "arn:aws:bedrock:*::foundation-model/amazon.titan-embed-text-v1"
+      ProvisionedConcurrencyConfig:
+        ProvisionedConcurrentExecutions: 1
       Environment:
         Variables:
           DOCUMENT_TABLE: !Ref DocumentTable
           BUCKET: !Ref DocumentBucket
+      EphemeralStorage: 
+        Size: 1024    
       Events:
         EmbeddingQueueEvent:
           Type: SQS
@@ -316,8 +350,9 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/generate_response/
-      Timeout: 30
-      MemorySize: 2048
+      Timeout: 60
+      MemorySize: 6144
+      AutoPublishAlias: live
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref MemoryTable
@@ -328,8 +363,15 @@ Resources:
               Effect: "Allow"
               Action: "bedrock:InvokeModel"
               Resource:
+                - "arn:aws:bedrock:*::foundation-model/anthropic.claude-v2:1"
                 - "arn:aws:bedrock:*::foundation-model/anthropic.claude-v2"
+                - "arn:aws:bedrock:*::foundation-model/anthropic.claude-v1"
+                - "arn:aws:bedrock:*::foundation-model/anthropic.claude-instant-v1"
                 - "arn:aws:bedrock:*::foundation-model/amazon.titan-embed-text-v1"
+                - "arn:aws:bedrock:*::foundation-model/amazon.titan-text-express-v1"
+                - "arn:aws:bedrock:*::foundation-model/amazon.titan-text-lite-v1"
+      ProvisionedConcurrencyConfig:
+        ProvisionedConcurrentExecutions: 3
       Environment:
         Variables:
           MEMORY_TABLE: !Ref MemoryTable
@@ -388,6 +430,57 @@ Resources:
       AppId: !GetAtt AmplifyApp.AppId
       EnableAutoBuild: true
 
+  MountTargetVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 172.31.0.0/16
+      EnableDnsHostnames: True
+      EnableDnsSupport: True      
+ 
+  MountTargetSubnetOne:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 172.31.1.0/24
+      VpcId: !Ref MountTargetVPC
+
+  FileSystemResource:
+    Type: 'AWS::EFS::FileSystem'
+    Properties:
+      PerformanceMode: generalPurpose
+      Encrypted: true
+      FileSystemTags:
+        - Key: Name
+          Value: TestFileSystem
+      FileSystemPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action:
+              - "elasticfilesystem:ClientMount"
+            Principal:
+              AWS: "*"
+
+  MountTargetResource1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystemResource
+      SubnetId: !Ref MountTargetSubnetOne
+      SecurityGroups: 
+        - !GetAtt MountTargetVPC.DefaultSecurityGroup
+
+  AccessPointResource:
+    Type: 'AWS::EFS::AccessPoint'
+    Properties:
+      FileSystemId: !Ref FileSystemResource
+      PosixUser:
+        Uid: "1000"
+        Gid: "1000"
+      RootDirectory:
+        CreationInfo:
+          OwnerGid: "1000"
+          OwnerUid: "1000"
+          Permissions: "0777"
+        Path: "/myefs"
 Outputs:
   CognitoUserPool:
     Value: !Ref CognitoUserPool
@@ -395,3 +488,24 @@ Outputs:
     Value: !Ref CognitoUserPoolClient
   ApiGatewayBaseUrl:
     Value: !Sub "https://${Api}.execute-api.${AWS::Region}.${AWS::URLSuffix}/dev/"
+  
+  vpcId:
+    Description: VPC ID
+    Value: 
+      Ref: MountTargetVPC
+  subnetId:
+    Description: Private Subnet A ID
+    Value: 
+      Ref: MountTargetSubnetOne
+  fileSystemId:
+    Description: File system ID
+    Value: 
+      Ref: FileSystemResource
+  mountTargetId:
+    Description: Mount point A ID
+    Value: 
+      Ref: MountTargetResource1
+  accessPointArn:
+    Description: Access point ARN
+    Value: 
+     Fn::GetAtt: AccessPointResource.Arn
